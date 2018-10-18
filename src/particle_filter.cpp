@@ -79,8 +79,6 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
         particles[i].x = dist_x(gen);
         particles[i].y = dist_y(gen);
         particles[i].theta = dist_theta(gen);
-
-
     }
 }
 
@@ -132,79 +130,77 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
     //   implement (look at equation 3.33
     //   http://planning.cs.uiuc.edu/node99.html
 
-    double weight_normalizer = 0.0;  // to keep the range of weights [0,1]
+    // for normalizing weights
+    double weight_normalizer = 0.0;
 
     for (int i = 0; i < num_particles; i++) {
         double px = particles[i].x;
         double py = particles[i].y;
         double ptheta = particles[i].theta;
 
-        // filter map to focus on the roi
-        vector<LandmarkObs> predictions;
+        vector<LandmarkObs> transformed_observations;
 
-        for (unsigned int j = 0; j < map_landmarks.landmark_list.size(); j++) {
-            double mx = map_landmarks.landmark_list[j].x_f;
-            double my = map_landmarks.landmark_list[j].x_f;
+        // Observations coordinates Transformation from vehicle to map
+        for (int j = 0; j < observations.size(); j++) {
+            int oid = observations[j].id;
+            double ox = px + (cos(ptheta) * observations[j].x) -
+                        (sin(ptheta) * observations[j].y);
+            double oy = py + (sin(ptheta) * observations[j].x) +
+                        (cos(ptheta) * observations[j].y);
+            transformed_observations.push_back(LandmarkObs{oid, ox, oy});
+        }
+
+        // Map ROI filter
+        vector<LandmarkObs> predicted_landmarks;
+        for (int j = 0; j < map_landmarks.landmark_list.size(); j++) {
             int mid = map_landmarks.landmark_list[j].id_i;
+            double mx = map_landmarks.landmark_list[j].x_f;
+            double my = map_landmarks.landmark_list[j].y_f;
 
             if (fabs(mx - px) <= sensor_range &&
                 fabs(my - py) <= sensor_range) {
-                predictions.push_back(LandmarkObs{mid, mx, my});
+                predicted_landmarks.push_back(LandmarkObs{mid, mx, my});
             }
         }
 
-        // coordinate transform
-        vector<LandmarkObs> transformed_os;
-        for (unsigned int k = 0; k < observations.size(); k++) {
-            int tid = observations[k].id;
-            double tx = px + cos(ptheta) * observations[k].x -
-                        sin(ptheta) * observations[k].y;
-            double ty = py + sin(ptheta) * observations[k].x +
-                        cos(ptheta) * observations[k].y;
-            transformed_os.push_back(LandmarkObs{tid, tx, ty});
-        }
+        // Data association
+        dataAssociation(predicted_landmarks, transformed_observations);
 
-        // association
-        dataAssociation(predictions, transformed_os);
+        // Calculate the weights with Multivariate Gaussian distribution.
+        double sigma_x = std_landmark[0];
+        double sigma_y = std_landmark[1];
+        double sigma_x_2 = pow(sigma_x, 2);
+        double sigma_y_2 = pow(sigma_y, 2);
+        double normalizer = (1.0 / (2.0 * M_PI * sigma_x * sigma_y));
 
-        // cal the weights with gaussian distribution
-        particles[i].weight = 1.0;
+        /*Calculate the weight of particle based on the multivariate Gaussian
+         * probability function*/
+        for (int k = 0; k < transformed_observations.size(); k++) {
+            double trans_obs_x = transformed_observations[k].x;
+            double trans_obs_y = transformed_observations[k].y;
+            double trans_obs_id = transformed_observations[k].id;
+            double multi_prob = 1.0;
 
-        for (unsigned int l = 0; l < transformed_os.size(); l++) {
-            // placeholders for observation and associated prediction
-            // coordinates
-            double tr_x = transformed_os[l].x;
-            double tr_y = transformed_os[l].y;
-            int tr_id = transformed_os[l].id;
+            for (int l = 0; l < predicted_landmarks.size(); l++) {
+                double pred_landmark_x = predicted_landmarks[l].x;
+                double pred_landmark_y = predicted_landmarks[l].y;
+                double pred_landmark_id = predicted_landmarks[l].id;
 
-            double pr_x, pr_y, pr_id;
-            // get the x,y coordinates of the prediction associated with the
-            // current observation
-            for (unsigned int m = 0; m < predictions.size(); m++) {
-                if (predictions[m].id == tr_id) {
-                    pr_x = predictions[m].x;
-                    pr_y = predictions[m].y;
-                    pr_id = predictions[m].id;
-                }
-
-                if (tr_id == pr_id) {
-                    // calculate weight for this observation with multivariate
-                    // Gaussian
-                    double sigma_x = std_landmark[0];
-                    double sigma_y = std_landmark[1];
-                    double obs_w =
-                        (1 / (2 * M_PI * sigma_x * sigma_y)) *
-                        exp(-(pow(pr_x - tr_x, 2) / (2 * pow(sigma_x, 2)) +
-                              (pow(pr_y - tr_y, 2) / (2 * pow(sigma_y, 2)))));
-
-                    particles[i].weight *= obs_w;
+                if (trans_obs_id == pred_landmark_id) {
+                    multi_prob =
+                        normalizer *
+                        exp(-1.0 * ((pow((trans_obs_x - pred_landmark_x), 2) /
+                                     (2.0 * sigma_x_2)) +
+                                    (pow((trans_obs_y - pred_landmark_y), 2) /
+                                     (2.0 * sigma_y_2))));
+                    particles[i].weight *= multi_prob;
                 }
             }
         }
         weight_normalizer += particles[i].weight;
     }
 
-    /*Step 5: Normalize the weights*/
+    // Normalize the weights
     for (int i = 0; i < particles.size(); i++) {
         particles[i].weight /= weight_normalizer;
         weights[i] = particles[i].weight;
